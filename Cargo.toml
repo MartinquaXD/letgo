@@ -15,3 +15,17 @@ calamine = "0.16.1"
 chrono = "0.4.13"
 regex = "1"
 openssl = { version = "0.10", features = ["vendored"] }
+tempfile = "3.1.0"
+mime = "0.3.16"
+dotenv = "0.15.0"
+
+#use specific branches for those dependencies because we rely on a certian bug fix which is not
+#yet included in the latest version
+
+[dependencies.lettre]
+git = "https://github.com/lettre/lettre.git"
+branch = "v0.9.x"
+
+[dependencies.lettre_email]
+git = "https://github.com/lettre/lettre.git"
+branch = "v0.9.x"

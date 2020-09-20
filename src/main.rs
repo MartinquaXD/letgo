@@ -1,35 +1,46 @@
 #![feature(async_closure)]
 
-use calamine::{open_workbook, Reader, Xlsx};
+use calamine::{open_workbook, Reader, Xlsx, DataType};
 use futures::future::join_all;
 use regex::Regex;
-use tokio::prelude::*;
 use scraper::{Html, Selector};
+use dotenv::dotenv;
 
 // http://www.helios825.org/url-parameters.php
 
-fn read_portfolio2() -> Result<Vec<Item>, Box<dyn std::error::Error>> {
-    let mut excel: Xlsx<_> = open_workbook("Mappe.xlsx")?;
+const PLACEHOLDER: &str = "Platzhalter (schon verkauft)";
+
+fn find_column( header_row: &[DataType], column_name: &str) -> usize {
+    header_row.iter().enumerate().find( |( _index, item )| {
+        return !item.is_empty() && item.get_string() == Some( column_name );
+    } ).expect( &format!( "couldn't find column '{}'", &column_name ) ).0
+}
+
+fn read_portfolio( path: &dyn AsRef<std::path::Path> ) -> Result<Vec<Option<Item>>, Box<dyn std::error::Error>> {
+    let mut excel: Xlsx<_> = open_workbook( path )?;
     if let Some(Ok(r)) = excel.worksheet_range("Tabelle1") {
-        let mut unique_items = Vec::new();
+        let first_row = &r.rows().next().expect( "portfolio needs at least 1 row including the column names" );
+        let set_number_index = find_column( first_row, "Setnummer" );
+        let bought_at_index = find_column( first_row, "Kaufpreis" );
+        let set_sold_index = find_column( first_row, "Verkaufsdatum" );
+        let target_price_index = find_column( first_row, "UVP LEGO" );
+
 
         Ok(r.rows()
             .skip(1)
-            .filter_map(|row| {
-                if row[1].is_empty() || row[3].is_empty() {
+            //dont skip items to be able to import those items into the original file
+            //mark sold items as skip
+            .map(|row| {
+                if row[set_number_index].is_empty() || row[bought_at_index].is_empty()
+                 || !row[set_sold_index].is_empty() {
                     return None;
                 }
 
-                let id = row[1].get_float().unwrap().to_string();
-                if unique_items.iter().any(|item| item == &id) {
-                    return None;
-                }
-
-                unique_items.push(id.clone());
+                let id = row[set_number_index].get_float().unwrap().to_string();
                 Some( Item {
                     set_number: id,
-                    target_price: row[3].get_float().unwrap(),
-                    bought: row[4].get_float().unwrap()
+                    target_price: row[target_price_index].get_float().unwrap(),
+                    bought: row[bought_at_index].get_float().unwrap()
                 } )
             })
             .collect())
@@ -69,7 +80,7 @@ struct Item {
     set_number: String,
 }
 
-async fn get_request_id() -> Result<String, Box<dyn std::error::Error>> {
+async fn get_ebay_request_id() -> Result<String, Box<dyn std::error::Error>> {
     let start = search_link("http://www.ebay.de").await?;
     let sel =
         Selector::parse("input[type='hidden'][name='_trksid']").expect("Can't parse selector");
@@ -122,7 +133,7 @@ struct ItemAnalysis {
     data_points: usize,
 }
 
-fn analyze_results(item: &Item, mut results: Vec<ItemResult>) -> Option<ItemAnalysis> {
+fn analyze_crawled_results(item: &Item, mut results: Vec<ItemResult>) -> Option<ItemAnalysis> {
     let mut result = ItemAnalysis {
         min: f64::MAX,
         max: 0.0,
@@ -169,17 +180,9 @@ fn analyze_results(item: &Item, mut results: Vec<ItemResult>) -> Option<ItemAnal
     Some(result)
 }
 
-async fn handle_portfolio_item(item: Item, id: &str) -> Result<(String, f64), Box<dyn std::error::Error>> {
-    // if item.set_number != "42096" {
-    //     return;
-    // }
-
-    let url = format!( "http://www.ebay.de/sch/i.html?_from=R40&_trksid={}&_nkw=Lego+{}&_ipg=200&LH_Sold=1&_sop=1&LH_ItemCondition=3",
-            id, item.set_number ).to_string();
-
-    let document = search_link(&url).await?;
+fn collect_plausible_entries( document: &Html ) -> Vec<ItemResult> {
     let selector = Selector::parse("li.s-item").expect("Can't parse selector");
-    let results: Vec<_> = document
+    document
         .select(&selector)
         .filter_map(|ebay_item| {
             let price = ebay_item
@@ -221,35 +224,99 @@ async fn handle_portfolio_item(item: Item, id: &str) -> Result<(String, f64), Bo
                 None
             }
         })
-        .collect();
+        .collect()
+}
 
-    analyze_results(&item, results)
+async fn determine_current_value(item: Item, id: &str) -> Result<(String, f64), Box<dyn std::error::Error>> {
+    let url = format!( "http://www.ebay.de/sch/i.html?_from=R40&_trksid={}&_nkw=Lego+{}&_ipg=200&LH_Sold=1&_sop=1&LH_ItemCondition=3",
+            id, item.set_number ).to_string();
+    let document = search_link(&url).await?;
+    let results = collect_plausible_entries( &document );
+    analyze_crawled_results(&item, results)
         .and_then( |res| Some( (item.set_number.clone(), res.avg) ) )
         .ok_or( String::from( "Couldn't analyze item results." ).into() )
 }
 
-async fn store_results( data: &Vec<(String, f64)> ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut file = tokio::fs::File::create("analysis.csv").await?;
+fn create_csv( data: &Vec<(String, f64)> ) -> String {
     let header = "set_number, price in €\n".to_string();
-    let content = data.iter().map( |item| format!( "{}, {:.2}", item.0, item.1 ) ).collect::<Vec<_>>().join( "\n" );
-    file.write_all( (header + &content).as_bytes() ).await?;
-    Ok(())
+    let content = data.iter().map( |item| {
+        if item.0 == PLACEHOLDER {
+            PLACEHOLDER.to_string() + ","
+        } else {
+            format!( "{}, {:.2}", item.0, item.1 )
+        }
+    } ).collect::<Vec<_>>().join( "\n" );
+    header + &content
+}
+
+async fn download_portfolio( url: &str ) -> Result<Vec<Option<Item>>, Box<dyn std::error::Error>> {
+    use std::io::{Write};
+    let response = reqwest::Client::builder()
+        .build()
+        .expect("Can't create header")
+        .get(url)
+        .send()
+        .await?
+        .bytes()
+        .await?;
+
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all( &response as &[u8] )?;
+    read_portfolio( &file.path() )
+}
+
+fn send_email_with_result( data: &[u8] ) {
+    use lettre::smtp::authentication::Credentials;
+    use lettre::{SmtpClient, Transport};
+    use lettre_email::Email;
+
+    let email = Email::builder()
+    .from( dotenv::var( "FROM_EMAIL" ).unwrap() )
+    .to( dotenv::var( "TO_EMAIL" ).unwrap() )
+    .subject("Lego-Portfolio-Analyse")
+    .attachment(data, "analysis_result.csv", &mime::STAR_STAR).unwrap()
+    .html("<h1>Lego Portfolio Auswertung erfolgreich</h1>")
+    .text("Ergenisse sind im Anhang")
+    .build().unwrap();
+    
+    let creds = Credentials::new(dotenv::var( "FROM_EMAIL" ).unwrap(), dotenv::var( "FROM_EMAIL_PASSWORD" ).unwrap());
+    
+    // Open a remote connection to gmail
+    let mut mailer = SmtpClient::new_simple("smtp.gmail.com")
+    .unwrap()
+    .credentials(creds)
+    .transport();
+    
+    // Send the email
+    match mailer.send(email.into()) {
+        Ok(_) => println!("Email sent successfully!"),
+        Err(e) => panic!("Could not send email: {:?}", e),
+    }
+    
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenv().ok();
     let start = chrono::Local::now();
 
-    let id = get_request_id().await?;
-    let portfolio = read_portfolio2()?;
+    let portfolio = download_portfolio( dotenv::var( "PORTFOLIO_LINK" ).unwrap().as_str() ).await?;
+    let id = get_ebay_request_id().await?;
 
     let id2 = &id;
     let handle_portfolio: Vec<_> = portfolio
         .into_iter()
-        .map(async move |item| handle_portfolio_item(item, &id2).await)
+        .map(async move |item| {
+            match item {
+                Some( item ) => determine_current_value(item, &id2).await,
+                None => Ok( (PLACEHOLDER.to_string(), 0.0) )
+            }
+            
+        })
         .collect();
     let analysis: Vec<_> = join_all(handle_portfolio).await.into_iter().filter_map( |res| res.ok() ).collect();
-    store_results( &analysis ).await?;
+    let result = create_csv( &analysis );
+    send_email_with_result( result.as_bytes() );
     println!(
         "computed current portfolio value in {} seconds.",
         chrono::Local::now()
