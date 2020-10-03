@@ -8,7 +8,7 @@ use dotenv::dotenv;
 
 // http://www.helios825.org/url-parameters.php
 
-const PLACEHOLDER: &str = "Platzhalter (schon verkauft)";
+const PLACEHOLDER: &str = "Platzhalter (fehlende Setnummer oder UVP)";
 
 fn find_column( header_row: &[DataType], column_name: &str) -> usize {
     header_row.iter().enumerate().find( |( _index, item )| {
@@ -21,18 +21,13 @@ fn read_portfolio( path: &dyn AsRef<std::path::Path> ) -> Result<Vec<Option<Item
     if let Some(Ok(r)) = excel.worksheet_range("Tabelle1") {
         let first_row = &r.rows().next().expect( "portfolio needs at least 1 row including the column names" );
         let set_number_index = find_column( first_row, "Setnummer" );
-        let bought_at_index = find_column( first_row, "Kaufpreis" );
-        let set_sold_index = find_column( first_row, "Verkaufsdatum" );
         let target_price_index = find_column( first_row, "UVP LEGO" );
-
 
         Ok(r.rows()
             .skip(1)
-            //dont skip items to be able to import those items into the original file
-            //mark sold items as skip
             .map(|row| {
-                if row[set_number_index].is_empty() || row[bought_at_index].is_empty()
-                 || !row[set_sold_index].is_empty() {
+                if row[set_number_index].is_empty() || row[target_price_index].is_empty() {
+                    println!( "invalid row {:#?} {} {}", row, row[set_number_index].is_empty(), row[target_price_index].is_empty()  );
                     return None;
                 }
 
@@ -40,7 +35,6 @@ fn read_portfolio( path: &dyn AsRef<std::path::Path> ) -> Result<Vec<Option<Item
                 Some( Item {
                     set_number: id,
                     target_price: row[target_price_index].get_float().unwrap(),
-                    bought: row[bought_at_index].get_float().unwrap()
                 } )
             })
             .collect())
@@ -75,7 +69,6 @@ async fn search_link(link: &str) -> Result<Html, Box<dyn std::error::Error>> {
 
 #[derive(Debug)]
 struct Item {
-    bought: f64,
     target_price: f64,
     set_number: String,
 }
@@ -170,12 +163,9 @@ fn analyze_crawled_results(item: &Item, mut results: Vec<ItemResult>) -> Option<
     result.data_points = results.len();
     result.avg = sum / result.data_points as f64;
     println!(
-        "item: {}   bought for: {}€  current: {:.2}€   gain: {:.0}% / {:.2} €",
+        "item: {}   current: {:.2}€",
         &item.set_number,
-        &item.bought,
         &result.avg,
-        ((&result.avg / &item.bought) * 100.0) - 100.0,
-        &result.avg - &item.bought
     );
     Some(result)
 }
