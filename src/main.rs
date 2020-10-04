@@ -241,7 +241,7 @@ async fn determine_current_value_robust(item: Item, id: &str) -> Result<(String,
 }
 
 fn create_csv( data: &Vec<Result<(String, f64), Box<dyn std::error::Error>>> ) -> String {
-    let header = "set_number, price in €\n".to_string();
+    let header = "price in €\n".to_string();
     let content = data.iter().map( |item| {
         match item {
             Err(_) => format!( "Fehler bei der Bearbeitung" ),
@@ -249,7 +249,7 @@ fn create_csv( data: &Vec<Result<(String, f64), Box<dyn std::error::Error>>> ) -
                 if set == PLACEHOLDER {
                     PLACEHOLDER.to_string() + ","
                 } else {
-                    format!( "{}, {:.2}", set, val )
+                    format!( "{:.2}", val )
                 }
             }
         }
