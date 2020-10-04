@@ -27,7 +27,6 @@ fn read_portfolio( path: &dyn AsRef<std::path::Path> ) -> Result<Vec<Option<Item
             .skip(1)
             .map(|row| {
                 if row[set_number_index].is_empty() || row[target_price_index].is_empty() {
-                    println!( "invalid row {:#?} {} {}", row, row[set_number_index].is_empty(), row[target_price_index].is_empty()  );
                     return None;
                 }
 
@@ -67,7 +66,7 @@ async fn search_link(link: &str) -> Result<Html, Box<dyn std::error::Error>> {
     Ok(Html::parse_document(&response))
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Item {
     target_price: f64,
     set_number: String,
@@ -227,13 +226,32 @@ async fn determine_current_value(item: Item, id: &str) -> Result<(String, f64), 
         .ok_or( String::from( "Couldn't analyze item results." ).into() )
 }
 
-fn create_csv( data: &Vec<(String, f64)> ) -> String {
+async fn determine_current_value_robust(item: Item, id: &str) -> Result<(String, f64), Box<dyn std::error::Error>> {
+    let mut i = 0;
+    let mut res = Ok( (PLACEHOLDER.to_string(), 0.0 ) );
+    while true {
+        res = determine_current_value( item.clone(), id ).await;
+        if res.is_ok() || i == 3 {
+            return res;
+        }
+        i += 1;
+    }
+
+    res
+}
+
+fn create_csv( data: &Vec<Result<(String, f64), Box<dyn std::error::Error>>> ) -> String {
     let header = "set_number, price in €\n".to_string();
     let content = data.iter().map( |item| {
-        if item.0 == PLACEHOLDER {
-            PLACEHOLDER.to_string() + ","
-        } else {
-            format!( "{}, {:.2}", item.0, item.1 )
+        match item {
+            Err(_) => format!( "Fehler bei der Bearbeitung" ),
+            Ok( ( set, val ) ) => {
+                if set == PLACEHOLDER {
+                    PLACEHOLDER.to_string() + ","
+                } else {
+                    format!( "{}, {:.2}", set, val )
+                }
+            }
         }
     } ).collect::<Vec<_>>().join( "\n" );
     header + &content
@@ -298,13 +316,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into_iter()
         .map(async move |item| {
             match item {
-                Some( item ) => determine_current_value(item, &id2).await,
+                Some( item ) => determine_current_value_robust(item, &id2).await,
                 None => Ok( (PLACEHOLDER.to_string(), 0.0) )
             }
             
         })
         .collect();
-    let analysis: Vec<_> = join_all(handle_portfolio).await.into_iter().filter_map( |res| res.ok() ).collect();
+    let analysis: Vec<_> = join_all(handle_portfolio).await.into_iter().collect();
     let result = create_csv( &analysis );
     send_email_with_result( result.as_bytes() );
     println!(
