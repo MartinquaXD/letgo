@@ -327,26 +327,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
 
     let id = &get_ebay_request_id().await?;
-    let portfolio = download_portfolio( dotenv::var( "PORTFOLIO_LINK" ).expect( ".env contains PORTFOLIO_LINK" ).as_str() ).await?;
-    let mut unique_items: HashSet<_> = portfolio.iter().collect();
+    let links = dotenv::var( "PORTFOLIO_LINK" ).expect( ".env contains PORTFOLIO_LINK" ).to_string();
+    for link in links.split( ' ' ) {
+        let portfolio = download_portfolio( link ).await?;
+        let mut unique_items: HashSet<_> = portfolio.iter().collect();
 
-    let fetch_items = unique_items.drain().cloned().map( async move |item| {
-                match item {
-                    Some( item ) => Some( determine_current_value_robust(item, &id).await.unwrap() ),
-                    None => None
-                }
-            });
+        let fetch_items = unique_items.drain().cloned().map( async move |item| {
+                    match item {
+                        Some( item ) => Some( determine_current_value_robust(item, &id).await.unwrap() ),
+                        None => None
+                    }
+                });
 
-    let analysis: HashMap<String, f64> = futures::stream::iter( fetch_items ).buffer_unordered( num_cpus::get() ).collect::<Vec<_>>().await
-        .into_iter().filter_map( |val| val ).collect::<HashMap<_,_>>();
-    let result = create_csv( portfolio, &analysis );
-    send_email_with_result( result.as_bytes() );
-    println!(
-        "computed current portfolio value in {} seconds.",
-        chrono::Local::now()
-            .signed_duration_since(start)
-            .num_seconds()
-    );
+        let analysis: HashMap<String, f64> = futures::stream::iter( fetch_items ).buffer_unordered( num_cpus::get() ).collect::<Vec<_>>().await
+            .into_iter().filter_map( |val| val ).collect::<HashMap<_,_>>();
+        let result = create_csv( portfolio, &analysis );
+        // send_email_with_result( result.as_bytes() );
+        println!(
+            "computed current portfolio value in {} seconds.",
+            chrono::Local::now()
+                .signed_duration_since(start)
+                .num_seconds()
+        );
+    }
     Ok(())
 }
 
