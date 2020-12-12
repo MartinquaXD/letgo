@@ -8,9 +8,9 @@ use futures::StreamExt;
 use std::hash::{Hash, Hasher};
 use std::collections::{ HashSet, HashMap };
 
-// http://www.helios825.org/url-parameters.php
+type Error = Box<dyn std::error::Error>;
+type MyResult<T> = Result<T, Error>;
 
-const PLACEHOLDER: &str = "Platzhalter (fehlende Setnummer oder UVP)";
 
 fn find_column( header_row: &[DataType], column_name: &str) -> usize {
     header_row.iter().enumerate().find( |( _index, item )| {
@@ -18,7 +18,7 @@ fn find_column( header_row: &[DataType], column_name: &str) -> usize {
     } ).expect( &format!( "couldn't find column '{}'", &column_name ) ).0
 }
 
-fn read_portfolio( path: &dyn AsRef<std::path::Path> ) -> Result<Vec<Option<Item>>, Box<dyn std::error::Error>> {
+fn read_portfolio( path: &dyn AsRef<std::path::Path> ) -> MyResult<Vec<MyResult<Item>>> {
     let mut excel: Xlsx<_> = open_workbook( path )?;
     if let Some(Ok(r)) = excel.worksheet_range("Tabelle1") {
         let first_row = &r.rows().next().expect( "portfolio needs at least 1 row including the column names" );
@@ -28,13 +28,18 @@ fn read_portfolio( path: &dyn AsRef<std::path::Path> ) -> Result<Vec<Option<Item
         Ok(r.rows()
             .skip(1)
             .map(|row| {
-                if row[set_number_index].is_empty() || row[target_price_index].is_empty() {
-                    return None;
+                if row[set_number_index].is_empty() && row[target_price_index].is_empty() {
+                    return Err( "".into() );
+                }
+                if row[set_number_index].is_empty() {
+                    return Err( "Set Nummer fehlt".into() );
+                }
+                if row[target_price_index].is_empty() {
+                    return Err( "UVP fehlt".into() );
                 }
 
                 let id = row[set_number_index].get_float().unwrap().to_string();
-                println!("item: {}, price: {}", id, row[target_price_index].get_float().unwrap());
-                Some( Item {
+                Ok( Item {
                     set_number: id,
                     target_price: row[target_price_index].get_float().unwrap(),
                 } )
@@ -45,7 +50,7 @@ fn read_portfolio( path: &dyn AsRef<std::path::Path> ) -> Result<Vec<Option<Item
     }
 }
 
-async fn search_link(link: &str) -> Result<Html, Box<dyn std::error::Error>> {
+async fn search_link(link: &str) -> MyResult<Html> {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         reqwest::header::USER_AGENT,
@@ -89,7 +94,7 @@ impl Hash for Item {
     }
 }
 
-async fn get_ebay_request_id() -> Result<String, Box<dyn std::error::Error>> {
+async fn get_ebay_request_id() -> MyResult<String> {
     let start = search_link("http://www.ebay.de").await?;
     let sel =
         Selector::parse("input[type='hidden'][name='_trksid']").expect("Can't parse selector");
@@ -142,7 +147,7 @@ struct ItemAnalysis {
     data_points: usize,
 }
 
-fn analyze_crawled_results(item: &Item, mut results: Vec<ItemResult>) -> Option<ItemAnalysis> {
+fn analyze_crawled_results(item: &Item, mut results: Vec<ItemResult>) -> MyResult<ItemAnalysis> {
     let mut result = ItemAnalysis {
         min: f64::MAX,
         max: 0.0,
@@ -166,7 +171,7 @@ fn analyze_crawled_results(item: &Item, mut results: Vec<ItemResult>) -> Option<
     });
 
     if results.is_empty() {
-        return None;
+        return Err( "Keine sinnvollen Ergebnisse gefunden".into() );
     }
 
     let mut sum = 0.0;
@@ -183,7 +188,7 @@ fn analyze_crawled_results(item: &Item, mut results: Vec<ItemResult>) -> Option<
         &item.set_number,
         &result.avg,
     );
-    Some(result)
+    Ok( result )
 }
 
 fn collect_plausible_entries( document: &Html ) -> Vec<ItemResult> {
@@ -233,40 +238,35 @@ fn collect_plausible_entries( document: &Html ) -> Vec<ItemResult> {
         .collect()
 }
 
-async fn determine_current_value(item: Item, id: &str) -> Result<(String, f64), Box<dyn std::error::Error>> {
+async fn determine_current_value(item: Item, id: &str) -> MyResult<f64> {
     let url = format!( "http://www.ebay.de/sch/i.html?_from=R40&_trksid={}&_nkw=Lego+{}&_ipg=200&LH_Sold=1&_sop=1&LH_ItemCondition=3",
             id, item.set_number ).to_string();
     let document = search_link(&url).await?;
     let results = collect_plausible_entries( &document );
-    analyze_crawled_results(&item, results)
-        .and_then( |res| Some( (item.set_number.clone(), res.avg) ) )
-        .ok_or( String::from( "Couldn't analyze item results." ).into() )
+    analyze_crawled_results(&item, results).and_then( |res| Ok( res.avg ) )
 }
 
-async fn determine_current_value_robust(item: Item, id: &str) -> Result<(String, f64), Box<dyn std::error::Error>> {
-    let mut i = 0;
-    let mut res = Ok( (PLACEHOLDER.to_string(), 0.0 ) );
-    while true {
-        println!("request item {} {}", item.set_number, i);
-        res = determine_current_value( item.clone(), id ).await;
+async fn determine_current_value_robust(item: Item, id: &str) -> MyResult<f64> {
+    let mut i = 0u8;
+    loop {
+        let res = determine_current_value( item.clone(), id ).await;
         if res.is_ok() || i == 5 {
             return res;
         }
         i += 1;
     }
-
-    res
 }
 
-fn create_csv( portfolio: Vec<Option<Item>>, data: &HashMap<String, f64> ) -> String {
+fn create_csv( portfolio: Vec<MyResult<Item>>, data: &HashMap<String, MyResult<f64>> ) -> String {
     let header = "price in €\n".to_string();
     let content = portfolio.into_iter().map( |item| {
         match item {
-            None => PLACEHOLDER.to_string() + ",",
-            Some( item ) => {
+            Err( error ) => error.to_string(),
+            Ok( item ) => {
                 match data.get( &item.set_number ) {
-                    None => PLACEHOLDER.to_string() + ",",
-                    Some( price ) => format!( "{:.2}", price ).to_string()
+                    None => unreachable!(),
+                    Some( Err( error ) ) => error.to_string(),
+                    Some( Ok( price ) ) => format!( "{:.2}", price ).to_string()
                 }
             }
         }
@@ -274,7 +274,7 @@ fn create_csv( portfolio: Vec<Option<Item>>, data: &HashMap<String, f64> ) -> St
     header + &content
 }
 
-async fn download_portfolio( url: &str ) -> Result<Vec<Option<Item>>, Box<dyn std::error::Error>> {
+async fn download_portfolio( url: &str ) -> MyResult<Vec<MyResult<Item>>> {
     use std::io::Write;
     let response = reqwest::Client::builder()
         .build()
@@ -322,7 +322,7 @@ fn send_email_with_result( data: &[u8] ) {
 
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> MyResult<()> {
     let start = chrono::Local::now();
     dotenv().ok();
 
@@ -330,19 +330,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let links = dotenv::var( "PORTFOLIO_LINK" ).expect( ".env contains PORTFOLIO_LINK" ).to_string();
     for link in links.split( ' ' ) {
         let portfolio = download_portfolio( link ).await?;
-        let mut unique_items: HashSet<_> = portfolio.iter().collect();
+        let mut unique_items: HashSet<Item> = portfolio.iter().filter_map( |i| match i {
+            Err( _ ) => None,
+            Ok( val ) => Some( val.clone() )
+        } ).collect();
 
-        let fetch_items = unique_items.drain().cloned().map( async move |item| {
-                    match item {
-                        Some( item ) => Some( determine_current_value_robust(item, &id).await.unwrap() ),
-                        None => None
-                    }
-                });
+        let fetch_items = unique_items.drain()
+            .map( async move |item| ( item.set_number.clone(), determine_current_value_robust( item, &id ).await ) );
 
-        let analysis: HashMap<String, f64> = futures::stream::iter( fetch_items ).buffer_unordered( num_cpus::get() ).collect::<Vec<_>>().await
-            .into_iter().filter_map( |val| val ).collect::<HashMap<_,_>>();
+        let analysis: HashMap<_, _> = futures::stream::iter( fetch_items )
+            .buffer_unordered( num_cpus::get() ).collect::<Vec<_>>().await
+            .into_iter().collect::<HashMap<_,_>>();
+
         let result = create_csv( portfolio, &analysis );
-        // send_email_with_result( result.as_bytes() );
+        println!( "{}", result );
+        send_email_with_result( result.as_bytes() );
         println!(
             "computed current portfolio value in {} seconds.",
             chrono::Local::now()
