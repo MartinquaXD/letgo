@@ -5,6 +5,8 @@ use regex::Regex;
 use scraper::{Html, Selector};
 use dotenv::dotenv;
 use futures::StreamExt;
+use std::hash::{Hash, Hasher};
+use std::collections::{ HashSet, HashMap };
 
 // http://www.helios825.org/url-parameters.php
 
@@ -71,6 +73,20 @@ async fn search_link(link: &str) -> Result<Html, Box<dyn std::error::Error>> {
 struct Item {
     target_price: f64,
     set_number: String,
+}
+
+impl PartialEq for Item {
+    fn eq(&self, other: &Self) -> bool {
+        self.set_number == other.set_number
+    }
+}
+
+impl Eq for Item{}
+
+impl Hash for Item {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        self.set_number.hash(hasher);
+    }
 }
 
 async fn get_ebay_request_id() -> Result<String, Box<dyn std::error::Error>> {
@@ -242,13 +258,17 @@ async fn determine_current_value_robust(item: Item, id: &str) -> Result<(String,
     res
 }
 
-fn create_csv( data: &Vec<(String, f64)> ) -> String {
+fn create_csv( portfolio: Vec<Option<Item>>, data: &HashMap<String, f64> ) -> String {
     let header = "price in €\n".to_string();
-    let content = data.iter().map( |(set, val)| {
-        if set == PLACEHOLDER {
-            PLACEHOLDER.to_string() + ","
-        } else {
-            format!( "{:.2}", val )
+    let content = portfolio.into_iter().map( |item| {
+        match item {
+            None => PLACEHOLDER.to_string() + ",",
+            Some( item ) => {
+                match data.get( &item.set_number ) {
+                    None => PLACEHOLDER.to_string() + ",",
+                    Some( price ) => format!( "{:.2}", price ).to_string()
+                }
+            }
         }
     } ).collect::<Vec<_>>().join( "\n" );
     header + &content
@@ -307,16 +327,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
 
     let id = &get_ebay_request_id().await?;
-    let analzye_items = download_portfolio( dotenv::var( "PORTFOLIO_LINK" ).expect( ".env contains PORTFOLIO_LINK" ).as_str() ).await?
-        .into_iter().map( async move |item| {
+    let portfolio = download_portfolio( dotenv::var( "PORTFOLIO_LINK" ).expect( ".env contains PORTFOLIO_LINK" ).as_str() ).await?;
+    let mut unique_items: HashSet<_> = portfolio.iter().collect();
+
+    let fetch_items = unique_items.drain().cloned().map( async move |item| {
                 match item {
-                    Some( item ) => determine_current_value_robust(item, &id).await.unwrap(),
-                    None => (PLACEHOLDER.to_string(), 0.0)
+                    Some( item ) => Some( determine_current_value_robust(item, &id).await.unwrap() ),
+                    None => None
                 }
             });
 
-    let analysis = futures::stream::iter( analzye_items ).buffer_unordered( num_cpus::get() ).collect().await;
-    let result = create_csv( &analysis );
+    let analysis: HashMap<String, f64> = futures::stream::iter( fetch_items ).buffer_unordered( num_cpus::get() ).collect::<Vec<_>>().await
+        .into_iter().filter_map( |val| val ).collect::<HashMap<_,_>>();
+    let result = create_csv( portfolio, &analysis );
     send_email_with_result( result.as_bytes() );
     println!(
         "computed current portfolio value in {} seconds.",
