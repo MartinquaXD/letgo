@@ -1431,6 +1431,7 @@ dependencies = [
  "lettre",
  "lettre_email",
  "mime",
+ "num_cpus",
  "openssl",
  "regex",
  "reqwest",

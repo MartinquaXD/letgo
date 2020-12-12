@@ -18,6 +18,7 @@ openssl = { version = "0.10", features = ["vendored"] }
 tempfile = "3.1.0"
 mime = "0.3.16"
 dotenv = "0.15.0"
+num_cpus = "1.13.0"
 
 #use specific branches for those dependencies because we rely on a certian bug fix which is not
 #yet included in the latest version

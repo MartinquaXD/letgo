@@ -1,10 +1,10 @@
 #![feature(async_closure)]
 
 use calamine::{open_workbook, Reader, Xlsx, DataType};
-use futures::future::join_all;
 use regex::Regex;
 use scraper::{Html, Selector};
 use dotenv::dotenv;
+use futures::StreamExt;
 
 // http://www.helios825.org/url-parameters.php
 
@@ -31,6 +31,7 @@ fn read_portfolio( path: &dyn AsRef<std::path::Path> ) -> Result<Vec<Option<Item
                 }
 
                 let id = row[set_number_index].get_float().unwrap().to_string();
+                println!("item: {}, price: {}", id, row[target_price_index].get_float().unwrap());
                 Some( Item {
                     set_number: id,
                     target_price: row[target_price_index].get_float().unwrap(),
@@ -230,8 +231,9 @@ async fn determine_current_value_robust(item: Item, id: &str) -> Result<(String,
     let mut i = 0;
     let mut res = Ok( (PLACEHOLDER.to_string(), 0.0 ) );
     while true {
+        println!("request item {} {}", item.set_number, i);
         res = determine_current_value( item.clone(), id ).await;
-        if res.is_ok() || i == 3 {
+        if res.is_ok() || i == 5 {
             return res;
         }
         i += 1;
@@ -240,25 +242,20 @@ async fn determine_current_value_robust(item: Item, id: &str) -> Result<(String,
     res
 }
 
-fn create_csv( data: &Vec<Result<(String, f64), Box<dyn std::error::Error>>> ) -> String {
+fn create_csv( data: &Vec<(String, f64)> ) -> String {
     let header = "price in €\n".to_string();
-    let content = data.iter().map( |item| {
-        match item {
-            Err(_) => format!( "Fehler bei der Bearbeitung" ),
-            Ok( ( set, val ) ) => {
-                if set == PLACEHOLDER {
-                    PLACEHOLDER.to_string() + ","
-                } else {
-                    format!( "{:.2}", val )
-                }
-            }
+    let content = data.iter().map( |(set, val)| {
+        if set == PLACEHOLDER {
+            PLACEHOLDER.to_string() + ","
+        } else {
+            format!( "{:.2}", val )
         }
     } ).collect::<Vec<_>>().join( "\n" );
     header + &content
 }
 
 async fn download_portfolio( url: &str ) -> Result<Vec<Option<Item>>, Box<dyn std::error::Error>> {
-    use std::io::{Write};
+    use std::io::Write;
     let response = reqwest::Client::builder()
         .build()
         .expect("Can't create header")
@@ -306,24 +303,19 @@ fn send_email_with_result( data: &[u8] ) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenv().ok();
     let start = chrono::Local::now();
+    dotenv().ok();
 
-    let portfolio = download_portfolio( dotenv::var( "PORTFOLIO_LINK" ).unwrap().as_str() ).await?;
-    let id = get_ebay_request_id().await?;
+    let id = &get_ebay_request_id().await?;
+    let analzye_items = download_portfolio( dotenv::var( "PORTFOLIO_LINK" ).expect( ".env contains PORTFOLIO_LINK" ).as_str() ).await?
+        .into_iter().map( async move |item| {
+                match item {
+                    Some( item ) => determine_current_value_robust(item, &id).await.unwrap(),
+                    None => (PLACEHOLDER.to_string(), 0.0)
+                }
+            });
 
-    let id2 = &id;
-    let handle_portfolio: Vec<_> = portfolio
-        .into_iter()
-        .map(async move |item| {
-            match item {
-                Some( item ) => determine_current_value_robust(item, &id2).await,
-                None => Ok( (PLACEHOLDER.to_string(), 0.0) )
-            }
-            
-        })
-        .collect();
-    let analysis: Vec<_> = join_all(handle_portfolio).await.into_iter().collect();
+    let analysis = futures::stream::iter( analzye_items ).buffer_unordered( num_cpus::get() ).collect().await;
     let result = create_csv( &analysis );
     send_email_with_result( result.as_bytes() );
     println!(
@@ -334,3 +326,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     Ok(())
 }
+
