@@ -211,13 +211,13 @@ async fn determine_current_value(item: PortfolioItem, id: &str) -> MyResult<f64>
 }
 
 async fn determine_current_value_robust(item: PortfolioItem, id: &str) -> MyResult<f64> {
-    let mut i = 0u8;
+    let mut retries = 0u8;
     loop {
         let res = determine_current_value( item.clone(), id ).await;
-        if res.is_ok() || i == 5 {
+        if res.is_ok() || retries == 5 {
             return res;
         }
-        i += 1;
+        retries += 1;
     }
 }
 
