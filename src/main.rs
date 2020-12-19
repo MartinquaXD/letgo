@@ -1,11 +1,13 @@
 #![feature(async_closure)]
 
+mod helper_types;
+use helper_types::*;
+
 use calamine::{open_workbook, Reader, Xlsx, DataType};
 use regex::Regex;
 use scraper::{Html, Selector};
 use dotenv::dotenv;
 use futures::StreamExt;
-use std::hash::{Hash, Hasher};
 use std::collections::{ HashSet, HashMap };
 
 type Error = Box<dyn std::error::Error>;
@@ -18,7 +20,7 @@ fn find_column( header_row: &[DataType], column_name: &str) -> usize {
     } ).expect( &format!( "couldn't find column '{}'", &column_name ) ).0
 }
 
-fn get_item_of_row( row: &[DataType], set_number: usize, target_price: usize ) -> MyResult<Item> {
+fn get_item_of_row( row: &[DataType], set_number: usize, target_price: usize ) -> MyResult<PortfolioItem> {
     if row[set_number].is_empty() && row[target_price].is_empty() {
         //returning an empty error will lead to an empty row in the csv down the line
         return Err( "".into() );
@@ -30,13 +32,13 @@ fn get_item_of_row( row: &[DataType], set_number: usize, target_price: usize ) -
         return Err( "UVP fehlt".into() );
     }
 
-    Ok( Item {
+    Ok( PortfolioItem {
         set_number: row[set_number].get_float().unwrap().to_string(),
         target_price: row[target_price].get_float().unwrap(),
     } )
 }
 
-fn read_portfolio( path: &dyn AsRef<std::path::Path> ) -> MyResult<Vec<MyResult<Item>>> {
+fn read_portfolio( path: &dyn AsRef<std::path::Path> ) -> MyResult<Vec<MyResult<PortfolioItem>>> {
     let mut excel: Xlsx<_> = open_workbook( path )?;
     if let Some(Ok(r)) = excel.worksheet_range("Tabelle1") {
         let first_row = &r.rows().next().expect( "portfolio needs at least 1 row including the column names" );
@@ -77,26 +79,6 @@ async fn search_link(link: &str) -> MyResult<Html> {
     Ok(Html::parse_document(&response))
 }
 
-#[derive(Debug, Clone)]
-struct Item {
-    target_price: f64,
-    set_number: String,
-}
-
-impl PartialEq for Item {
-    fn eq(&self, other: &Self) -> bool {
-        self.set_number == other.set_number
-    }
-}
-
-impl Eq for Item{}
-
-impl Hash for Item {
-    fn hash<H: Hasher>(&self, hasher: &mut H) {
-        self.set_number.hash(hasher);
-    }
-}
-
 async fn get_ebay_request_id() -> MyResult<String> {
     let start = search_link("http://www.ebay.de").await?;
     let sel =
@@ -109,13 +91,6 @@ async fn get_ebay_request_id() -> MyResult<String> {
         .attr("value")
         .unwrap()
         .to_string())
-}
-
-#[derive(Debug, Clone)]
-struct ItemResult {
-    price: f64,
-    date: chrono::DateTime<chrono::FixedOffset>,
-    name: String,
 }
 
 pub fn parse_date(mut date: String) -> chrono::DateTime<chrono::FixedOffset> {
@@ -137,26 +112,14 @@ pub fn parse_date(mut date: String) -> chrono::DateTime<chrono::FixedOffset> {
         "Dez" => "12",
         _ => "-1",
     };
-    let time = parts.next().unwrap();
+    let time = parts.next().expect( "Ebay result has time" );
 
     let corrected_date = format!("{}-{}-{} {} +0000", day, month, 2020, time);
     chrono::DateTime::parse_from_str(&corrected_date, "%d-%m-%Y %H:%M %z").unwrap()
 }
 
-struct ItemAnalysis {
-    min: f64,
-    max: f64,
-    avg: f64,
-    data_points: usize,
-}
-
-fn analyze_crawled_results(item: &Item, mut results: Vec<ItemResult>) -> MyResult<ItemAnalysis> {
-    let mut result = ItemAnalysis {
-        min: f64::MAX,
-        max: 0.0,
-        avg: 0.0,
-        data_points: 0,
-    };
+fn analyze_crawled_results(item: &PortfolioItem, mut results: Vec<EbayResult>) -> MyResult<PriceAnalysis> {
+    let mut result = PriceAnalysis::default();
     let set_regex = Regex::new(r"\d{5,}").unwrap();
     results.retain(|result| {
         let is_recent =
@@ -194,7 +157,7 @@ fn analyze_crawled_results(item: &Item, mut results: Vec<ItemResult>) -> MyResul
     Ok( result )
 }
 
-fn collect_plausible_entries( document: &Html ) -> Vec<ItemResult> {
+fn collect_plausible_entries( document: &Html ) -> Vec<EbayResult> {
     let selector = Selector::parse("li.s-item").expect("Can't parse selector");
     document
         .select(&selector)
@@ -229,7 +192,7 @@ fn collect_plausible_entries( document: &Html ) -> Vec<ItemResult> {
                 .or(Some("".to_string()));
 
             if let (Some(price), Some(date)) = (price, date) {
-                Some(ItemResult {
+                Some(EbayResult {
                     price,
                     date,
                     name: name.unwrap(),
@@ -241,15 +204,15 @@ fn collect_plausible_entries( document: &Html ) -> Vec<ItemResult> {
         .collect()
 }
 
-async fn determine_current_value(item: Item, id: &str) -> MyResult<f64> {
-    let url = format!( "http://www.ebay.de/sch/i.html?_from=R40&_trksid={}&_nkw=Lego+{}&_ipg=200&LH_Sold=1&_sop=1&LH_ItemCondition=3",
+async fn determine_current_value(item: PortfolioItem, id: &str) -> MyResult<f64> {
+    let url = format!( "http://www.ebay.de/sch/i.html?_from=R40&_trksid={}&_nkw=Lego+{}&_ipg=200&LH_Sold=1&_sop=1&LH_PortfolioItemCondition=3",
             id, item.set_number ).to_string();
     let document = search_link(&url).await?;
     let results = collect_plausible_entries( &document );
     analyze_crawled_results(&item, results).and_then( |res| Ok( res.avg ) )
 }
 
-async fn determine_current_value_robust(item: Item, id: &str) -> MyResult<f64> {
+async fn determine_current_value_robust(item: PortfolioItem, id: &str) -> MyResult<f64> {
     let mut i = 0u8;
     loop {
         let res = determine_current_value( item.clone(), id ).await;
@@ -260,7 +223,7 @@ async fn determine_current_value_robust(item: Item, id: &str) -> MyResult<f64> {
     }
 }
 
-fn create_csv( portfolio: Vec<MyResult<Item>>, data: &HashMap<String, MyResult<f64>> ) -> String {
+fn create_csv( portfolio: Vec<MyResult<PortfolioItem>>, data: &HashMap<String, MyResult<f64>> ) -> String {
     let header = "price in €\n".to_string();
     let content = portfolio.into_iter().map( |item| {
         match item {
@@ -277,7 +240,7 @@ fn create_csv( portfolio: Vec<MyResult<Item>>, data: &HashMap<String, MyResult<f
     header + &content
 }
 
-async fn download_portfolio( url: &str ) -> MyResult<Vec<MyResult<Item>>> {
+async fn download_portfolio( url: &str ) -> MyResult<Vec<MyResult<PortfolioItem>>> {
     use std::io::Write;
     let response = reqwest::Client::builder()
         .build()
@@ -333,7 +296,7 @@ async fn main() -> MyResult<()> {
     let links = dotenv::var( "PORTFOLIO_LINK" ).expect( ".env contains PORTFOLIO_LINK" ).to_string();
     for link in links.split( ' ' ) {
         let portfolio = download_portfolio( link ).await?;
-        let mut unique_items: HashSet<Item> = portfolio.iter().filter_map( |i| match i {
+        let mut unique_items: HashSet<PortfolioItem> = portfolio.iter().filter_map( |i| match i {
             Err( _ ) => None,
             Ok( val ) => Some( val.clone() )
         } ).collect();
