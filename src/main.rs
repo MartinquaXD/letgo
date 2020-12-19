@@ -4,9 +4,7 @@ mod helper_types;
 use helper_types::*;
 
 use calamine::{open_workbook, Reader, Xlsx, DataType};
-use regex::Regex;
 use scraper::{Html, Selector};
-use dotenv::dotenv;
 use futures::StreamExt;
 use std::collections::{ HashSet, HashMap };
 
@@ -120,7 +118,7 @@ pub fn parse_date(mut date: String) -> chrono::DateTime<chrono::FixedOffset> {
 
 fn analyze_crawled_results(item: &PortfolioItem, mut results: Vec<EbayResult>) -> MyResult<PriceAnalysis> {
     let mut result = PriceAnalysis::default();
-    let set_regex = Regex::new(r"\d{5,}").unwrap();
+    let set_regex = regex::Regex::new(r"\d{5,}").unwrap();
     results.retain(|result| {
         let is_recent =
             chrono::Local::now().signed_duration_since(result.date) < chrono::Duration::days(30);
@@ -290,7 +288,7 @@ fn send_email_with_result( data: &[u8] ) {
 #[tokio::main]
 async fn main() -> MyResult<()> {
     let start = chrono::Local::now();
-    dotenv().ok();
+    dotenv::dotenv().ok();
 
     let id = &get_ebay_request_id().await?;
     let links = dotenv::var( "PORTFOLIO_LINK" ).expect( ".env contains PORTFOLIO_LINK" ).to_string();
