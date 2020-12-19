@@ -18,33 +18,36 @@ fn find_column( header_row: &[DataType], column_name: &str) -> usize {
     } ).expect( &format!( "couldn't find column '{}'", &column_name ) ).0
 }
 
+fn get_item_of_row( row: &[DataType], set_number: usize, target_price: usize ) -> MyResult<Item> {
+    if row[set_number].is_empty() && row[target_price].is_empty() {
+        //returning an empty error will lead to an empty row in the csv down the line
+        return Err( "".into() );
+    }
+    if row[set_number].is_empty() {
+        return Err( "Set Nummer fehlt".into() );
+    }
+    if row[target_price].is_empty() {
+        return Err( "UVP fehlt".into() );
+    }
+
+    Ok( Item {
+        set_number: row[set_number].get_float().unwrap().to_string(),
+        target_price: row[target_price].get_float().unwrap(),
+    } )
+}
+
 fn read_portfolio( path: &dyn AsRef<std::path::Path> ) -> MyResult<Vec<MyResult<Item>>> {
     let mut excel: Xlsx<_> = open_workbook( path )?;
     if let Some(Ok(r)) = excel.worksheet_range("Tabelle1") {
         let first_row = &r.rows().next().expect( "portfolio needs at least 1 row including the column names" );
         let set_number_index = find_column( first_row, "Setnummer" );
         let target_price_index = find_column( first_row, "UVP LEGO" );
-
-        Ok(r.rows()
+        let results = r.rows()
             .skip(1)
-            .map(|row| {
-                if row[set_number_index].is_empty() && row[target_price_index].is_empty() {
-                    return Err( "".into() );
-                }
-                if row[set_number_index].is_empty() {
-                    return Err( "Set Nummer fehlt".into() );
-                }
-                if row[target_price_index].is_empty() {
-                    return Err( "UVP fehlt".into() );
-                }
+            .map(|row| get_item_of_row( row, set_number_index, target_price_index ) )
+            .collect();
 
-                let id = row[set_number_index].get_float().unwrap().to_string();
-                Ok( Item {
-                    set_number: id,
-                    target_price: row[target_price_index].get_float().unwrap(),
-                } )
-            })
-            .collect())
+        Ok( results )
     } else {
         Ok(vec![])
     }
