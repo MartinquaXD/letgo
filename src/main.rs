@@ -91,9 +91,11 @@ async fn get_ebay_request_id() -> MyResult<String> {
         .to_string())
 }
 
-pub fn parse_date(mut date: String) -> chrono::DateTime<chrono::FixedOffset> {
-    date.retain(|c| c != '.');
+pub fn parse_date(mut date: String) -> Result<chrono::DateTime<chrono::FixedOffset>, chrono::ParseError> {
+    date.retain(|c| c != '.' && c != ',');
     let mut parts = date.split(' ');
+    parts.next();
+    parts.next();
     let day = parts.next().unwrap().to_string();
     let month = match parts.next().unwrap() {
         "Jan" => "01",
@@ -101,19 +103,22 @@ pub fn parse_date(mut date: String) -> chrono::DateTime<chrono::FixedOffset> {
         "Mar" => "03",
         "Apr" => "04",
         "Mai" => "05",
+        "May" => "05",
         "Jun" => "06",
         "Jul" => "07",
         "Aug" => "08",
         "Sep" => "09",
         "Okt" => "10",
+        "Oct" => "10",
         "Nov" => "11",
         "Dez" => "12",
+        "Dec" => "12",
         _ => "-1",
     };
-    let time = parts.next().expect( "Ebay result has time" );
+    let year = parts.next().unwrap();
 
-    let corrected_date = format!("{}-{}-{} {} +0000", day, month, 2020, time);
-    chrono::DateTime::parse_from_str(&corrected_date, "%d-%m-%Y %H:%M %z").unwrap()
+    let corrected_date = format!("{}-{}-{} 00:00 +0000", day, month, year);
+    chrono::DateTime::parse_from_str(&corrected_date, "%d-%m-%Y %H:%M %z").into()
 }
 
 fn analyze_crawled_results(item: &PortfolioItem, mut results: Vec<EbayResult>) -> MyResult<PriceAnalysis> {
@@ -174,13 +179,13 @@ fn collect_plausible_entries( document: &Html ) -> Vec<EbayResult> {
 
             let date = ebay_item
                 .select(
-                    &Selector::parse("span.s-item__detail>span.s-item__ended-date")
+                    &Selector::parse("span.POSITIVE")
                         .expect("Can't parse selector"),
                 )
                 .next()
                 .and_then(|date| {
                     let date_str = date.text().nth(0).unwrap().to_string();
-                    Some(parse_date(date_str))
+                    parse_date(date_str).ok()
                 });
 
             let name = ebay_item
